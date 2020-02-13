@@ -1,0 +1,279 @@
+# ______          _           _     _ _ _     _   _
+# | ___ \        | |         | |   (_) (_)   | | (_)
+# | |_/ / __ ___ | |__   __ _| |__  _| |_ ___| |_ _  ___
+# |  __/ '__/ _ \| '_ \ / _` | '_ \| | | / __| __| |/ __|
+# | |  | | | (_) | |_) | (_| | |_) | | | \__ \ |_| | (__
+# \_|  |_|  \___/|_.__/ \__,_|_.__/|_|_|_|___/\__|_|\___|
+# ___  ___          _                 _
+# |  \/  |         | |               (_)
+# | .  . | ___  ___| |__   __ _ _ __  _  ___ ___
+# | |\/| |/ _ \/ __| '_ \ / _` | '_ \| |/ __/ __|
+# | |  | |  __/ (__| | | | (_| | | | | | (__\__ \
+# \_|  |_/\___|\___|_| |_|\__,_|_| |_|_|\___|___/
+#  _           _                     _
+# | |         | |                   | |
+# | |     __ _| |__   ___  _ __ __ _| |_ ___  _ __ _   _
+# | |    / _` | '_ \ / _ \| '__/ _` | __/ _ \| '__| | | |
+# | |___| (_| | |_) | (_) | | | (_| | || (_) | |  | |_| |
+# \_____/\__,_|_.__/ \___/|_|  \__,_|\__\___/|_|   \__, |
+#                                                   __/ |
+#                                                  |___/
+#
+# MIT License
+#
+# Copyright (c) 2019 Probabilistic Mechanics Laboratory
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+# ==============================================================================
+
+"""
+Calibration neural networks
+
+Observed output example
+"""
+
+import matplotlib
+import matplotlib.pyplot as plt
+
+import numpy as np
+
+from tensorflow import math
+
+from tensorflow.keras.callbacks import ReduceLROnPlateau, TerminateOnNaN
+from tensorflow.keras.layers import Input, Lambda, Dense
+from tensorflow.keras.models import Model, Sequential
+from tensorflow.keras.optimizers import RMSprop, Adam
+
+from tensorflow.python.framework import tensor_shape
+
+from tensorflow.python.keras import initializers, regularizers, constraints
+from tensorflow.python.keras.engine.base_layer import Layer
+
+
+# Layers
+
+class HighFidelity(Layer):
+    """
+    tt0TRUE = 12.0
+    tt1TRUE = 10.0
+    tt2TRUE = -5.0
+
+    f = ((6.0*x - 2)**2)*sin(tt0TRUE*x - 4) + 10.0*(x-0.5)**3 + tt1TRUE*(x-0.5) + tt2TRUE
+    """
+
+    def __init__(self,
+                 kernel_initializer='glorot_uniform',
+                 kernel_regularizer=None,
+                 kernel_constraint=None,
+                 **kwargs):
+        if 'input_shape' not in kwargs and 'input_dim' in kwargs:
+            kwargs['input_shape'] = (kwargs.pop('input_dim'),)
+        super(HighFidelity, self).__init__(**kwargs)
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.kernel_constraint = constraints.get(kernel_constraint)
+
+    def build(self, input_shape, **kwargs):
+        self.kernel = self.add_weight("kernel",
+                                      shape=[3],
+                                      initializer=self.kernel_initializer,
+                                      dtype=self.dtype,
+                                      trainable=self.trainable,
+                                      **kwargs)
+        self.built = True
+
+    def call(self, inputs):
+        output = ((6.0*inputs - 2)**2) * math.sin(self.kernel[0]*inputs - 4) + 10.0*(inputs-0.5)**3 + self.kernel[1]*(inputs-0.5) + self.kernel[2]
+        return output
+
+    def compute_output_shape(self, input_shape):
+        aux_shape = tensor_shape.TensorShape((None, 1))
+        return aux_shape[:-1].concatenate(1)
+
+
+class LowFidelity(Layer):
+    """
+    f = ((6.0*x - 2)**2)*sin(tt0*x - 4) + tt1*(x - 0.5) + tt2
+    """
+
+    def __init__(self,
+                 kernel_initializer='glorot_uniform',
+                 kernel_regularizer=None,
+                 kernel_constraint=None,
+                 **kwargs):
+        if 'input_shape' not in kwargs and 'input_dim' in kwargs:
+            kwargs['input_shape'] = (kwargs.pop('input_dim'),)
+        super(LowFidelity, self).__init__(**kwargs)
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.kernel_constraint = constraints.get(kernel_constraint)
+
+    def build(self, input_shape, **kwargs):
+        self.kernel = self.add_weight("kernel",
+                                      shape=[3],
+                                      initializer=self.kernel_initializer,
+                                      dtype=self.dtype,
+                                      trainable=self.trainable,
+                                      **kwargs)
+        self.built = True
+
+    def call(self, inputs):
+        output = (6.0*inputs - 2)**2*math.sin(self.kernel[0]*inputs - 4) + self.kernel[1]*(inputs - 0.5) + self.kernel[2]
+        return output
+
+    def compute_output_shape(self, input_shape):
+        aux_shape = tensor_shape.TensorShape((None, 1))
+        return aux_shape[:-1].concatenate(1)
+
+
+# Models
+
+def create_mlp(mlp_name, config):
+    if config == 1:
+        model = Sequential([
+            Dense(5, activation='elu'),
+            Dense(1)
+        ], name=mlp_name)
+
+    elif config == 2:
+        model = Sequential([
+            Dense(10, activation='elu'),
+            Dense(5, activation='elu'),
+            Dense(1)
+        ], name=mlp_name)
+
+    elif config == 3:
+        model = Sequential([
+            Dense(20, activation='elu'),
+            Dense(10, activation='elu'),
+            Dense(5, activation='elu'),
+            Dense(1)
+        ], name=mlp_name)
+
+    optimizer = RMSprop(5e-1)
+    model.compile(loss='mean_squared_error',
+                  optimizer=optimizer,
+                  metrics=['mean_absolute_error', 'mean_squared_error'])
+    return model
+
+
+def create_hf_model(tt0, tt1, tt2, batch_input_shape, myDtype):
+    batch_adjusted_shape = (batch_input_shape,)
+
+    highFidelityLayer = HighFidelity(input_shape=batch_adjusted_shape, dtype=myDtype, trainable=False)
+    highFidelityLayer.build(input_shape=batch_adjusted_shape)
+    highFidelityLayer.set_weights([np.asarray([tt0, tt1, tt2], dtype=highFidelityLayer.dtype)])
+
+    model = Sequential()
+    model.add(highFidelityLayer)
+
+    model.compile(loss='mean_squared_error',
+                  optimizer=Adam(1e-2),
+                  metrics=['mean_absolute_error', 'mean_squared_error'])
+    return model
+
+
+def create_calibration_model(tt0, tt1, tt2, discrepancy_mlp, batch_input_shape, myDtype):
+    batch_adjusted_shape = (batch_input_shape,)
+    inputLayer = Input(shape=(batch_input_shape,))
+
+    discrepancyLayer = discrepancy_mlp(inputLayer)
+
+    lowFidelityLayer = LowFidelity(input_shape=batch_adjusted_shape, dtype=myDtype, trainable=True)
+    lowFidelityLayer.build(input_shape=batch_adjusted_shape)
+    lowFidelityLayer.set_weights([np.asarray([tt0, tt1, tt2], dtype=lowFidelityLayer.dtype)])
+    lowFidelityLayer = lowFidelityLayer(inputLayer)
+
+    outputLayer = Lambda(lambda x: x[0] + x[1])([lowFidelityLayer, discrepancyLayer])
+
+    functionalModel = Model(inputs=[inputLayer], outputs=[outputLayer])
+
+    functionalModel.compile(loss='mse', optimizer=RMSprop(1e-1), metrics=['mae'])
+    return functionalModel
+
+
+# Parameters
+
+myDtype = 'float32'
+xLB = 0.0
+xUB = 1.0
+
+xPred = np.linspace(xLB, xUB, num=101, dtype='float32')
+
+tthf0 = 12.0
+tthf1 = 10.0
+tthf2 = -5.0
+
+ttlf0 = 12.0
+ttlf1 = 10.0
+ttlf2 = -5.0
+
+tt_init = np.asarray([10.0, 12.0, -8.0])
+
+# observation points
+obs = 5
+
+# 1: simple_mlp
+# 2: medium_mlp
+# 3: complex_mlp
+mlpconfig = 1
+
+MLP_EPOCHS = 200
+
+# Generate inputs
+xTrain = np.linspace(xLB, xUB, num=obs, dtype='float32')
+batch_input_shape = np.ndim(xTrain)
+
+# Calculate outputs
+high_fidelity = create_hf_model(tthf0, tthf1, tthf2, batch_input_shape, myDtype)
+yTrain = high_fidelity.predict(xTrain)
+
+# Create the discrepancy model
+discrepancy_mlp = create_mlp('discrepancy_model', mlpconfig)
+
+# Create the calibration model
+calibration_model = create_calibration_model(tt_init[0], tt_init[1], tt_init[2], discrepancy_mlp, batch_input_shape, myDtype)
+calibration_model.summary()
+
+# Fit callbacks
+ReduceLR = ReduceLROnPlateau(monitor='loss', factor=0.75, min_lr=1e-15, patience=5, verbose=1, mode='min')
+ToNaN = TerminateOnNaN()
+callbacks_list = [ReduceLR, ToNaN]
+
+# Model training
+history = calibration_model.fit(xTrain, yTrain, epochs=MLP_EPOCHS, verbose=1, callbacks=callbacks_list)
+
+# Make predictions
+yCalibrated = calibration_model.predict(xPred)
+discrepancy = discrepancy_mlp.predict(xPred)
+
+# Plot the results
+matplotlib.rc('font', size=14)
+plt.ylim([-15, 20])
+plt.xlim([0, 1])
+plt.grid('on')
+
+plt.plot(xTrain, yTrain, 'ko', fillstyle='none', label='observations')
+plt.plot(xPred, yCalibrated - discrepancy, color='orange', linestyle='-', label='$\u03B7$', linewidth=2)
+plt.plot(xPred, discrepancy, color='green', linestyle='-', label='$\u03B4$ Mean')
+plt.plot(xPred, yCalibrated, color='black', linestyle='-', label='$\u03B7 + \u03B4$')
+
+plt.tight_layout()
+plt.legend()
+plt.show()
